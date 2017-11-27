@@ -3,20 +3,22 @@ package main
 import (
 	"context"
 	"log"
-	//"runtime"
-	"sync"
-
-	cdp "github.com/knq/chromedp"
-	//cdptypes "github.com/knq/chromedp/cdp"
-	"github.com/knq/chromedp/client"
-	"fmt"
+	"net/http"
 	"net/url"
+	"strings"
+	"sync"
 	"time"
+
+	"github.com/PuerkitoBio/goquery"
+	cdp "github.com/knq/chromedp"
+	"github.com/knq/chromedp/client"
+	"github.com/shibukawa/opengraph"
 )
 
 type Task struct {
-	URL   *url.URL
-	Result *Result
+	URL    *url.URL
+	Route  *Route
+	Result chan string
 }
 
 type Runner struct {
@@ -24,13 +26,8 @@ type Runner struct {
 	config  *Config
 	chrome  *cdp.CDP
 	lock    sync.Mutex
-	results map[string]*Result
-}
-
-type Result struct {
-	InnerHTML string
-	Error     error
-	Wait      chan struct{}
+	cache   *Cache
+	profile *opengraph.Profile
 }
 
 func chromeWorker(runner *Runner) error {
@@ -43,26 +40,23 @@ func chromeWorker(runner *Runner) error {
 	go func() {
 		defer cancel()
 		for task := range runner.queue {
-			timeout, cancel := context.WithTimeout(ctxt, time.Second * 5)
-			result := task.Result
+			timeout, cancel := context.WithTimeout(ctxt, time.Second*5)
 			route := runner.config.RoutesByPath[task.URL.Path]
-			fmt.Println(task.URL.Path, runner.config.Routes)
-			fmt.Println("task.URL.String()", task.URL.String())
-			fmt.Println("route.BodySelector", route.BodySelector)
+			var html string
 			tasks := cdp.Tasks{
 				cdp.Navigate(task.URL.String()),
 				cdp.Sleep(time.Second),
 				cdp.WaitVisible(route.BodySelector, cdp.ByQuery),
-				cdp.InnerHTML(route.BodySelector, &result.InnerHTML),
+				cdp.InnerHTML("html", &html),
 			}
 			err := chrome.Run(timeout, tasks)
 			if err != nil {
-				result.Error = err
+				close(task.Result)
 			} else {
-				log.Println("result.InnerHTML", result.InnerHTML)
+				task.Result <- html
+				close(task.Result)
 			}
 			cancel()
-			close(result.Wait)
 		}
 	}()
 	return nil
@@ -72,34 +66,59 @@ func NewRunner(config *Config) *Runner {
 	runner := &Runner{
 		config:  config,
 		queue:   make(chan *Task, 10),
-		results: make(map[string]*Result),
+		cache:   NewCache(),
+		profile: opengraph.NewProfile(config.Domain, config.SiteOwner, config.SiteOwner, config.SiteLogoURL, config.SiteName, config.TwitterID, config.FacebookAppID),
 	}
 	chromeWorker(runner)
 	return runner
 }
 
-func (r *Runner) Request(url *url.URL) *Result {
+func (r *Runner) Request(request *http.Request, route *Route) {
 	r.lock.Lock()
 	defer r.lock.Unlock()
-	result, ok := r.results[url.String()]
-	if ok {
-		return result
+	cachedEntry := r.cache.Get(request)
+	if cachedEntry != nil {
+		return
 	}
+	cachedEntry = &CachedEntry{
+		Wait: make(chan struct{}),
+	}
+	defer close(cachedEntry.Wait)
+
+	r.cache.Set(request, cachedEntry)
+
 	task := &Task{
-		URL: url,
-		Result: &Result{
-			Wait: make(chan struct{}),
-		},
+		URL:    request.URL,
+		Result: make(chan string),
+		Route:  route,
 	}
-	r.results[url.String()] = task.Result
-	go func() {
-		r.queue <- task
-	}()
-	return task.Result
+	r.queue <- task
+	html := <-task.Result
+	document, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	if err != nil {
+		return
+	}
+	main := document.Find(route.BodySelector)
+	innerHTML, err := main.Html()
+	if err != nil {
+		return
+	}
+	description := main.Text()
+	if len(description) > 160 {
+		description = description[:160]
+	}
+	title := document.Find("title").Text()
+	imagePath := r.config.SiteLogoURL
+	image := document.Find("image")
+	if image != nil {
+		imagePath = image.AttrOr("src", r.config.SiteLogoURL)
+	}
+	article := r.profile.Article(request.URL.String(), title, description, imagePath, time.Now())
+	cachedEntry.InnerHTML = innerHTML
+	cachedEntry.OGP = article.Write()
+	return
 }
 
-func (r *Runner) Wait(url *url.URL) *Result {
-	result := r.Request(url)
-	<-result.Wait
-	return result
+func (r *Runner) WaitResult(request *http.Request) *CachedEntry {
+	return r.cache.Wait(request)
 }

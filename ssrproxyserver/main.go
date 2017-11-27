@@ -1,19 +1,18 @@
 package main
 
 import (
-	//"os/exec"
-	//"fmt"
 	"bytes"
-	"github.com/BurntSushi/toml"
-	"github.com/julienschmidt/httprouter"
-	//"github.com/k0kubun/pp"
 	"fmt"
+	"github.com/BurntSushi/toml"
+	"github.com/PuerkitoBio/goquery"
+	"github.com/julienschmidt/httprouter"
 	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 )
 
 var (
@@ -26,6 +25,9 @@ type Config struct {
 	BackendServer string            `toml:"backend_server"`
 	SiteName      string            `toml:"site_name"`
 	SiteOwner     string            `toml:"site_owner"`
+	SiteLogoURL   string            `toml:"site_logo_url"`
+	TwitterID     string            `tmol:"twitter_id"'`
+	FacebookAppID string            `tmol:"facebook_app_id"'`
 	Routes        map[string]*Route `toml:"route""`
 	RoutesByPath  map[string]*Route
 }
@@ -36,7 +38,6 @@ type Route struct {
 	BodySelector string `toml:"body_selector"`
 	OGP          bool   `toml:"ogp"`
 	SSR          bool   `toml:"ssr"`
-	AMP          bool   `toml:"amp"`
 }
 
 func (r *Route) Init(name string) {
@@ -46,37 +47,13 @@ func (r *Route) Init(name string) {
 	}
 }
 
-var sampleToml = `
-domain = "https://example.com"
-proxy_address = ":8080"
-backend_server = "http://192.168.1.3:8000"
-site_name = "shibu.jp"
-site_owner = "@shibu_jp"
-default_image = ""
-document_selectors = ["main"]
-
-[route.top]
-    path = "/"
-	body_selector = "#root"
-    ogp = true
-    ssr = true
-    amp = true
-
-[route.test]
-    path = "/test"
-	body_selector = "#main"
-    ogp = true
-    ssr = true
-    amp = true
-`
-
-func makeReverseProxyDirector(config *Config) (func(request *http.Request), error) {
+func makeReverseProxyDirector(config *Config, route *Route) (func(request *http.Request), error) {
 	backendURL, err := url.Parse(config.BackendServer)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("Forward to %s\n", backendURL.String())
 	return func(request *http.Request) {
+		log.Println("receive request:", request.URL.String())
 		url := *request.URL
 		url.Scheme = backendURL.Scheme
 		url.Host = backendURL.Host
@@ -94,7 +71,9 @@ func makeReverseProxyDirector(config *Config) (func(request *http.Request), erro
 		}
 		req.Header = request.Header
 		*request = *req
-		runner.Request(&url)
+		if route != nil && (route.OGP || route.SSR) {
+			go runner.Request(request, route)
+		}
 	}, nil
 }
 
@@ -102,9 +81,25 @@ func makeCustomReverseProxy(config *Config, route *Route, director func(request 
 	rp := &httputil.ReverseProxy{
 		Director: director,
 	}
-	if route.AMP || route.OGP || route.SSR {
+	if route.OGP || route.SSR {
 		rp.ModifyResponse = func(res *http.Response) error {
 			log.Println("modifyResponse", route.Name, res.Request.URL.String())
+			result := runner.WaitResult(res.Request)
+			document, err := goquery.NewDocumentFromReader(res.Body)
+			if err != nil {
+				return err
+			}
+			document.Find("head").AppendHtml(result.OGP)
+			body := document.Find(route.BodySelector)
+			body.SetHtml("")
+			body.AppendHtml(result.InnerHTML)
+			html, err := document.Html()
+			if err != nil {
+				return err
+			}
+			rawHtml := []byte(html)
+			res.Header.Set("Content-Length", strconv.Itoa(len(rawHtml)))
+			res.Body = ioutil.NopCloser(bytes.NewReader(rawHtml))
 			return nil
 		}
 	}
@@ -115,11 +110,8 @@ func main() {
 	config := Config{
 		RoutesByPath: make(map[string]*Route),
 	}
-	_, err := toml.Decode(sampleToml, &config)
-	if err != nil {
-		panic(err)
-	}
-	director, err := makeReverseProxyDirector(&config)
+
+	_, err := toml.DecodeFile("config.toml", &config)
 	if err != nil {
 		panic(err)
 	}
@@ -129,6 +121,10 @@ func main() {
 		route.Init(name)
 		if route.Path == "/" {
 			hasRoute = true
+		}
+		director, err := makeReverseProxyDirector(&config, route)
+		if err != nil {
+			panic(err)
 		}
 		config.RoutesByPath[route.Path] = route
 		router.Handler(http.MethodGet, route.Path, makeCustomReverseProxy(&config, route, director))
@@ -143,6 +139,10 @@ func main() {
 		http.MethodPost,
 		http.MethodPut,
 		http.MethodTrace,
+	}
+	director, err := makeReverseProxyDirector(&config, nil)
+	if err != nil {
+		panic(err)
 	}
 	for _, method := range methods {
 		if method == http.MethodGet && hasRoute {
