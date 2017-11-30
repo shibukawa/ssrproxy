@@ -3,16 +3,18 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"github.com/BurntSushi/toml"
-	"github.com/PuerkitoBio/goquery"
-	"github.com/julienschmidt/httprouter"
 	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strconv"
+	//"strconv"
+	"strings"
+
+	"github.com/BurntSushi/toml"
+	"github.com/PuerkitoBio/goquery"
+	"github.com/julienschmidt/httprouter"
 )
 
 var (
@@ -48,15 +50,19 @@ func (r *Route) Init(name string) {
 }
 
 func makeReverseProxyDirector(config *Config, route *Route) (func(request *http.Request), error) {
-	backendURL, err := url.Parse(config.BackendServer)
-	if err != nil {
-		return nil, err
-	}
 	return func(request *http.Request) {
 		log.Println("receive request:", request.URL.String())
-		url := *request.URL
-		url.Scheme = backendURL.Scheme
-		url.Host = backendURL.Host
+		var urlstr string
+		if strings.HasSuffix(config.BackendServer, "/") {
+			urlstr = config.BackendServer + request.URL.String()[1:]
+		} else {
+			urlstr = config.BackendServer + request.URL.String()
+		}
+		newURL, err := url.Parse(urlstr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		request.URL = newURL
 		var body io.Reader
 		if body != nil {
 			buffer, err := ioutil.ReadAll(request.Body)
@@ -65,12 +71,13 @@ func makeReverseProxyDirector(config *Config, route *Route) (func(request *http.
 			}
 			body = bytes.NewBuffer(buffer)
 		}
-		req, err := http.NewRequest(request.Method, url.String(), body)
+		req, err := http.NewRequest(request.Method, urlstr, body)
 		if err != nil {
 			log.Fatal(err.Error())
 		}
 		req.Header = request.Header
 		*request = *req
+		fmt.Println(route, route != nil && (route.OGP || route.SSR))
 		if route != nil && (route.OGP || route.SSR) {
 			go runner.Request(request, route)
 		}
@@ -98,7 +105,8 @@ func makeCustomReverseProxy(config *Config, route *Route, director func(request 
 				return err
 			}
 			rawHtml := []byte(html)
-			res.Header.Set("Content-Length", strconv.Itoa(len(rawHtml)))
+			fmt.Println(html, len(rawHtml))
+			res.Header.Del("Content-Length")
 			res.Body = ioutil.NopCloser(bytes.NewReader(rawHtml))
 			return nil
 		}
@@ -150,6 +158,16 @@ func main() {
 		}
 		router.Handler(method, "/", &httputil.ReverseProxy{Director: director})
 	}
+	proxyURL, err := url.Parse(config.ProxyAddress)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Printf("Start listening at %s\n", config.ProxyAddress)
-	log.Fatal(http.ListenAndServe(config.ProxyAddress, router))
+	var port string
+	if proxyURL.Port() == "" {
+		port = ":80"
+	} else {
+		port = ":" + proxyURL.Port()
+	}
+	log.Fatal(http.ListenAndServe(port, router))
 }

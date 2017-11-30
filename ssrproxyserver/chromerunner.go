@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
+	"fmt"
 	"github.com/PuerkitoBio/goquery"
 	cdp "github.com/knq/chromedp"
 	"github.com/knq/chromedp/client"
 	"github.com/shibukawa/opengraph"
-	"fmt"
 )
 
 type Task struct {
@@ -23,8 +23,8 @@ type Task struct {
 }
 
 type Result struct {
-	HTML string
-	Title string
+	InnerHTML string
+	Title     string
 }
 
 type Runner struct {
@@ -50,15 +50,20 @@ func chromeWorker(runner *Runner) error {
 		for task := range runner.queue {
 			timeout, cancel := context.WithTimeout(ctxt, time.Second*5)
 			var result Result
-			route := runner.config.RoutesByPath[task.URL.Path]
+			localURLStr := strings.Replace(task.URL.String(), runner.config.BackendServer, runner.config.ProxyAddress, 1)
+			localURL, err := url.Parse(localURLStr)
+			if err != nil {
+				log.Fatal(err)
+			}
+			route := runner.config.RoutesByPath[localURL.Path]
+			fmt.Println(task.URL.Path)
 			tasks := cdp.Tasks{
 				cdp.Navigate(task.URL.String()),
-				cdp.Sleep(3 * time.Second),
+				cdp.WaitVisible(route.BodySelector),
 				cdp.Title(&result.Title),
-				cdp.InnerHTML(route.BodySelector, &result.HTML),
+				cdp.InnerHTML(route.BodySelector, &result.InnerHTML),
 			}
-			log.Println(result)
-			err := chrome.Run(timeout, tasks)
+			err = chrome.Run(timeout, tasks)
 			if err != nil {
 				close(task.Result)
 			} else {
@@ -104,11 +109,11 @@ func (r *Runner) Request(request *http.Request, route *Route) {
 	r.queue <- task
 	result := <-task.Result
 	fmt.Println(result)
-	document, err := goquery.NewDocumentFromReader(strings.NewReader(result.HTML))
+	document, err := goquery.NewDocumentFromReader(strings.NewReader(result.InnerHTML))
 	if err != nil {
 		return
 	}
-	description := document.Text()
+	description := strings.TrimSpace(document.Text())
 	if len(description) > 160 {
 		description = description[:160]
 	}
@@ -118,7 +123,7 @@ func (r *Runner) Request(request *http.Request, route *Route) {
 		imagePath = image.AttrOr("src", r.config.SiteLogoURL)
 	}
 	article := r.profile.Article(request.URL.String(), result.Title, description, imagePath, time.Now())
-	cachedEntry.InnerHTML = result.HTML
+	cachedEntry.InnerHTML = result.InnerHTML
 	cachedEntry.OGP = article.Write()
 	return
 }
