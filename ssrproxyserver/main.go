@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	//"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -77,7 +76,6 @@ func makeReverseProxyDirector(config *Config, route *Route) (func(request *http.
 		}
 		req.Header = request.Header
 		*request = *req
-		fmt.Println(route, route != nil && (route.OGP || route.SSR))
 		if route != nil && (route.OGP || route.SSR) {
 			go runner.Request(request, route)
 		}
@@ -104,10 +102,8 @@ func makeCustomReverseProxy(config *Config, route *Route, director func(request 
 			if err != nil {
 				return err
 			}
-			rawHtml := []byte(html)
-			fmt.Println(html, len(rawHtml))
-			res.Header.Del("Content-Length")
-			res.Body = ioutil.NopCloser(bytes.NewReader(rawHtml))
+			b := []byte(html)
+			res.Body = ioutil.NopCloser(bytes.NewReader(b))
 			return nil
 		}
 	}

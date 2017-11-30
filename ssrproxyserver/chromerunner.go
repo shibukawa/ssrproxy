@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"fmt"
 	"github.com/PuerkitoBio/goquery"
 	cdp "github.com/knq/chromedp"
 	"github.com/knq/chromedp/client"
@@ -38,9 +37,8 @@ type Runner struct {
 
 func chromeWorker(runner *Runner) error {
 	ctxt, cancel := context.WithCancel(context.Background())
-	chrome, err := cdp.New(ctxt, cdp.WithTargets(client.New().WatchPageTargets(ctxt)),
-		cdp.WithLog(log.Printf), // show log when remove the heading comment
-	)
+	chrome, err := cdp.New(ctxt, cdp.WithTargets(client.New().WatchPageTargets(ctxt)))//cdp.WithLog(log.Printf), // show log when remove the heading comment
+
 	if err != nil {
 		return err
 	}
@@ -56,7 +54,6 @@ func chromeWorker(runner *Runner) error {
 				log.Fatal(err)
 			}
 			route := runner.config.RoutesByPath[localURL.Path]
-			fmt.Println(task.URL.Path)
 			tasks := cdp.Tasks{
 				cdp.Navigate(task.URL.String()),
 				cdp.WaitVisible(route.BodySelector),
@@ -108,7 +105,6 @@ func (r *Runner) Request(request *http.Request, route *Route) {
 	}
 	r.queue <- task
 	result := <-task.Result
-	fmt.Println(result)
 	document, err := goquery.NewDocumentFromReader(strings.NewReader(result.InnerHTML))
 	if err != nil {
 		return
