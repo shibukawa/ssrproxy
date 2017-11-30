@@ -13,12 +13,18 @@ import (
 	cdp "github.com/knq/chromedp"
 	"github.com/knq/chromedp/client"
 	"github.com/shibukawa/opengraph"
+	"fmt"
 )
 
 type Task struct {
 	URL    *url.URL
 	Route  *Route
-	Result chan string
+	Result chan *Result
+}
+
+type Result struct {
+	HTML string
+	Title string
 }
 
 type Runner struct {
@@ -32,7 +38,9 @@ type Runner struct {
 
 func chromeWorker(runner *Runner) error {
 	ctxt, cancel := context.WithCancel(context.Background())
-	chrome, err := cdp.New(ctxt, cdp.WithTargets(client.New().WatchPageTargets(ctxt)), cdp.WithLog(log.Printf))
+	chrome, err := cdp.New(ctxt, cdp.WithTargets(client.New().WatchPageTargets(ctxt)),
+		cdp.WithLog(log.Printf), // show log when remove the heading comment
+	)
 	if err != nil {
 		return err
 	}
@@ -41,19 +49,20 @@ func chromeWorker(runner *Runner) error {
 		defer cancel()
 		for task := range runner.queue {
 			timeout, cancel := context.WithTimeout(ctxt, time.Second*5)
+			var result Result
 			route := runner.config.RoutesByPath[task.URL.Path]
-			var html string
 			tasks := cdp.Tasks{
 				cdp.Navigate(task.URL.String()),
-				cdp.Sleep(time.Second),
-				cdp.WaitVisible(route.BodySelector, cdp.ByQuery),
-				cdp.InnerHTML("html", &html),
+				cdp.Sleep(3 * time.Second),
+				cdp.Title(&result.Title),
+				cdp.InnerHTML(route.BodySelector, &result.HTML),
 			}
+			log.Println(result)
 			err := chrome.Run(timeout, tasks)
 			if err != nil {
 				close(task.Result)
 			} else {
-				task.Result <- html
+				task.Result <- &result
 				close(task.Result)
 			}
 			cancel()
@@ -89,32 +98,27 @@ func (r *Runner) Request(request *http.Request, route *Route) {
 
 	task := &Task{
 		URL:    request.URL,
-		Result: make(chan string),
+		Result: make(chan *Result),
 		Route:  route,
 	}
 	r.queue <- task
-	html := <-task.Result
-	document, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	result := <-task.Result
+	fmt.Println(result)
+	document, err := goquery.NewDocumentFromReader(strings.NewReader(result.HTML))
 	if err != nil {
 		return
 	}
-	main := document.Find(route.BodySelector)
-	innerHTML, err := main.Html()
-	if err != nil {
-		return
-	}
-	description := main.Text()
+	description := document.Text()
 	if len(description) > 160 {
 		description = description[:160]
 	}
-	title := document.Find("title").Text()
 	imagePath := r.config.SiteLogoURL
 	image := document.Find("image")
 	if image != nil {
 		imagePath = image.AttrOr("src", r.config.SiteLogoURL)
 	}
-	article := r.profile.Article(request.URL.String(), title, description, imagePath, time.Now())
-	cachedEntry.InnerHTML = innerHTML
+	article := r.profile.Article(request.URL.String(), result.Title, description, imagePath, time.Now())
+	cachedEntry.InnerHTML = result.HTML
 	cachedEntry.OGP = article.Write()
 	return
 }
